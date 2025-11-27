@@ -370,6 +370,8 @@ $RECYCLE.BIN/
 *.db
 
 # Temp
+results_*/
 results_*.json
+optimized_*.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,venv,pycharm+all,visualstudiocode,windows,linux,macos
