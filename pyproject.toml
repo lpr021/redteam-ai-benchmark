@@ -3,10 +3,45 @@ name = "redteam-ai-benchmark"
 version = "1.0.0"
 description = "Evaluate uncensored LLMs for offensive security tasks"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
+    "pick>=2.4.0",
+    "pytest>=9.0.1",
     "requests>=2.32.5",
+]
+
+[project.optional-dependencies]
+semantic = [
+    "sentence-transformers>=2.2.2",
+    "torch>=2.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
 ]
 
 [project.scripts]
 redteam-benchmark = "run_benchmark:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.ruff]
+# Enable basic checks
+lint.select = ["E", "F", "I", "B"]
+lint.ignore = ["E501"]
+exclude = [
+    ".git",
+    ".mypy_cache",
+    ".ruff_cache",
+    "venv",
+    "__pycache__",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.6",
+]
