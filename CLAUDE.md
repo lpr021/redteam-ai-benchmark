@@ -28,10 +28,11 @@ This is the **Red Team AI Benchmark v1.0** - a tool for evaluating uncensored LL
 
 ### Supported Providers
 
-The benchmark supports two LLM API providers:
+The benchmark supports three LLM API providers:
 
 - **LM Studio**: OpenAI-compatible API (default: `http://localhost:1234`)
 - **Ollama**: Native Ollama API (default: `http://localhost:11434`)
+- **OpenRouter**: Cloud API for 100+ models (default: `https://openrouter.ai/api/v1`)
 
 ### Quick Start
 
@@ -228,13 +229,34 @@ If a response passes censorship check but fails accuracy, it receives 50% (plaus
 
 ```bash
 redteam-ai-benchmark/
-├── benchmark.json       # 12 benchmark questions (source of truth)
-├── answers_all.txt      # Reference answers for all questions
-├── run_benchmark.py     # Main evaluation script (unified CLI)
-├── pyproject.toml       # Python project metadata + CLI entry point
-├── CLAUDE.md            # This file - guidance for Claude Code
-├── README.md            # User-facing documentation
-└── .python-version      # Python 3.14
+├── benchmark.json           # 12 benchmark questions (source of truth)
+├── answers_all.txt          # Reference answers for all questions
+├── run_benchmark.py         # Main evaluation script (unified CLI)
+├── config.example.yaml      # Example YAML configuration
+├── pyproject.toml           # Python project metadata + CLI entry point
+├── CLAUDE.md                # This file - guidance for Claude Code
+├── README.md                # User-facing documentation
+├── .python-version          # Python 3.13
+│
+├── models/                  # LLM API client implementations
+│   ├── __init__.py          # Factory function create_client()
+│   ├── base.py              # APIClient abstract base class
+│   ├── lmstudio.py          # LMStudioClient
+│   ├── ollama.py            # OllamaClient
+│   └── openrouter.py        # OpenRouterClient (cloud API)
+│
+├── scoring/                 # Scoring system implementations
+│   ├── __init__.py          # Conditional exports
+│   ├── base.py              # BaseScorer, ScoringResult
+│   ├── keyword_scorer.py    # KeywordScorer (default)
+│   ├── technical_scorer.py  # TechnicalScorer (semantic + keywords)
+│   ├── llm_judge.py         # LLMJudge (LLM-as-Judge via OpenRouter)
+│   └── hybrid_scorer.py     # HybridScorer (combines Technical + LLM)
+│
+└── utils/                   # Utility modules
+    ├── __init__.py          # Exports
+    ├── config.py            # YAML configuration management
+    └── export.py            # JSON/CSV export functions
 ```
 
 ## Key Technical Details
@@ -433,20 +455,26 @@ uv run run_benchmark.py interactive ollama --semantic
 
 **Common options:**
 
-- `provider`: Choose `lmstudio` or `ollama`
+- `provider`: Choose `lmstudio`, `ollama`, or `openrouter`
 - `-e, --endpoint URL`: Custom endpoint (default: localhost:1234 for lmstudio, localhost:11434 for ollama)
+- `--api-key`: API key for providers that require it (e.g., OpenRouter)
 
 **For `run` command:**
 
 - `-m, --model MODEL`: Model name (required)
-- `-o, --output FILE`: Custom output filename (not yet implemented)
-- `--semantic`: Use semantic similarity scoring instead of keyword matching
-- `--semantic-model MODEL`: Sentence-transformer model for semantic scoring (default: all-MiniLM-L6-v2)
+- `-o, --output FILE`: Custom output filename
+- `--config FILE`: Load configuration from YAML file
+- `--export-csv`: Also export results to CSV format
+- `--scorer METHOD`: Scoring method: `keyword`, `semantic`, `hybrid`, `llm_judge` (default: keyword)
+- `--semantic`: Use semantic similarity scoring (shortcut for `--scorer semantic`)
+- `--semantic-model MODEL`: Sentence-transformer model (default: Alibaba-NLP/gte-large-en-v1.5)
 
 **For `interactive` command:**
 
-- `--semantic`: Use semantic similarity scoring instead of keyword matching
-- `--semantic-model MODEL`: Sentence-transformer model for semantic scoring (default: all-MiniLM-L6-v2)
+- `--export-csv`: Also export results to CSV format
+- `--scorer METHOD`: Scoring method: `keyword`, `semantic`, `hybrid`, `llm_judge`
+- `--semantic`: Use semantic similarity scoring
+- `--semantic-model MODEL`: Sentence-transformer model (default: Alibaba-NLP/gte-large-en-v1.5)
 
 ### Output
 
@@ -520,8 +548,41 @@ return 50  # Partial credit for non-censored responses
 
 ## Important Constraints
 
-- **Dual API support**: Both LM Studio (OpenAI-compatible) and Ollama (native)
-- **No external dependencies beyond requests**: Keep the script lightweight
-- **CLI-driven**: No hardcoded configuration, all via command-line arguments
-- **No build/test infrastructure**: This is a standalone evaluation script
+- **Triple API support**: LM Studio (OpenAI-compatible), Ollama (native), and OpenRouter (cloud)
+- **Modular architecture**: Separate modules for models/, scoring/, utils/
+- **Optional dependencies**: Heavy dependencies (sentence-transformers, httpx) are optional
+- **CLI-driven**: Configuration via command-line arguments or YAML config file
 - **Security context**: All code and prompts are designed for authorized security testing only
+
+## Scoring Methods
+
+| Method | Description | Requirements |
+|--------|-------------|--------------|
+| `keyword` | Keyword matching (default) | None |
+| `semantic` | Semantic similarity with embeddings | `uv sync --extra semantic` |
+| `hybrid` | Combines semantic + LLM judge | semantic + OPENROUTER_API_KEY |
+| `llm_judge` | LLM-as-Judge via OpenRouter | OPENROUTER_API_KEY |
+
+## YAML Configuration
+
+Create `config.yaml` from `config.example.yaml`:
+
+```yaml
+provider:
+  name: ollama
+  endpoint: http://localhost:11434
+
+scoring:
+  method: hybrid
+  semantic_model: Alibaba-NLP/gte-large-en-v1.5
+
+export:
+  formats: [json, csv]
+  output_dir: ./results
+
+optimization:
+  enabled: true
+  optimizer_model: llama3.3:70b
+```
+
+Usage: `uv run run_benchmark.py run ollama -m model --config config.yaml`

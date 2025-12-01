@@ -5,10 +5,20 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
 from pick import pick
+
+# Import new modular components
+from models import create_client as models_create_client, OPENROUTER_AVAILABLE
+from utils import load_config, export_results, get_interpretation, BenchmarkExporter
+from scoring import (
+    TECHNICAL_AVAILABLE,
+    LLM_JUDGE_AVAILABLE,
+    HYBRID_AVAILABLE,
+)
 
 # Optional semantic similarity support
 try:
@@ -874,9 +884,18 @@ class SemanticScorer:
             return 0
 
 
-def create_client(provider: str, endpoint: Optional[str], model: str) -> APIClient:
+def create_client(
+    provider: str,
+    endpoint: Optional[str],
+    model: str,
+    api_key: Optional[str] = None,
+) -> APIClient:
     """Create appropriate API client based on provider."""
-    # Set default endpoints
+    # Use modular client for openrouter
+    if provider == "openrouter":
+        return models_create_client(provider, endpoint, model, api_key)
+
+    # Set default endpoints for local providers
     if endpoint is None:
         if provider == "lmstudio":
             endpoint = "http://localhost:1234"
@@ -1125,7 +1144,8 @@ def cmd_list_models(args):
     """List available models from the provider."""
     try:
         # Create temporary client just to list models (model name not important)
-        client = create_client(args.provider, args.endpoint, "temp")
+        api_key = getattr(args, "api_key", None)
+        client = create_client(args.provider, args.endpoint, "temp", api_key)
 
         print(f"📋 Available models from {args.provider}:")
         print()
@@ -1159,7 +1179,8 @@ def cmd_interactive(args):
     """Interactive TUI for selecting and testing multiple models."""
     try:
         # Create temporary client to list models
-        client = create_client(args.provider, args.endpoint, "temp")
+        api_key = getattr(args, "api_key", None)
+        client = create_client(args.provider, args.endpoint, "temp", api_key)
 
         # Test connection
         if not client.test_connection():
@@ -1287,7 +1308,7 @@ def cmd_interactive(args):
 
             # Create client for this model
             try:
-                model_client = create_client(args.provider, args.endpoint, model_name)
+                model_client = create_client(args.provider, args.endpoint, model_name, api_key)
             except ValueError as e:
                 print(f"❌ Error creating client: {e}")
                 continue
@@ -1417,8 +1438,9 @@ def cmd_interactive(args):
 def cmd_run_benchmark(args):
     """Run the benchmark."""
     # Create API client
+    api_key = getattr(args, "api_key", None)
     try:
-        client = create_client(args.provider, args.endpoint, args.model)
+        client = create_client(args.provider, args.endpoint, args.model, api_key)
     except ValueError as e:
         print(f"❌ Error: {e}")
         sys.exit(1)
@@ -1613,18 +1635,22 @@ Examples:
     # List models command
     parser_ls = subparsers.add_parser("ls", help="List available models")
     parser_ls.add_argument(
-        "provider", choices=["lmstudio", "ollama"], help="API provider"
+        "provider", choices=["lmstudio", "ollama", "openrouter"], help="API provider"
     )
     parser_ls.add_argument(
         "-e",
         "--endpoint",
         help="Custom endpoint URL (default: localhost:1234 for lmstudio, localhost:11434 for ollama)",
     )
+    parser_ls.add_argument(
+        "--api-key",
+        help="API key for providers that require it (e.g., OpenRouter)",
+    )
 
     # Run benchmark command
     parser_run = subparsers.add_parser("run", help="Run benchmark")
     parser_run.add_argument(
-        "provider", choices=["lmstudio", "ollama"], help="API provider"
+        "provider", choices=["lmstudio", "ollama", "openrouter"], help="API provider"
     )
     parser_run.add_argument("-m", "--model", required=True, help="Model name")
     parser_run.add_argument(
@@ -1633,6 +1659,25 @@ Examples:
         help="Custom endpoint URL (default: localhost:1234 for lmstudio, localhost:11434 for ollama)",
     )
     parser_run.add_argument("-o", "--output", help="Custom output filename")
+    parser_run.add_argument(
+        "--api-key",
+        help="API key for providers that require it (e.g., OpenRouter)",
+    )
+    parser_run.add_argument(
+        "--config",
+        help="Load configuration from YAML file",
+    )
+    parser_run.add_argument(
+        "--export-csv",
+        action="store_true",
+        help="Also export results to CSV format",
+    )
+    parser_run.add_argument(
+        "--scorer",
+        choices=["keyword", "semantic", "hybrid", "llm_judge"],
+        default="keyword",
+        help="Scoring method (default: keyword)",
+    )
     parser_run.add_argument(
         "--semantic",
         action="store_true",
@@ -1669,12 +1714,27 @@ Examples:
         "interactive", help="Interactive TUI for selecting and testing multiple models"
     )
     parser_interactive.add_argument(
-        "provider", choices=["lmstudio", "ollama"], help="API provider"
+        "provider", choices=["lmstudio", "ollama", "openrouter"], help="API provider"
     )
     parser_interactive.add_argument(
         "-e",
         "--endpoint",
         help="Custom endpoint URL (default: localhost:1234 for lmstudio, localhost:11434 for ollama)",
+    )
+    parser_interactive.add_argument(
+        "--api-key",
+        help="API key for providers that require it (e.g., OpenRouter)",
+    )
+    parser_interactive.add_argument(
+        "--export-csv",
+        action="store_true",
+        help="Also export results to CSV format",
+    )
+    parser_interactive.add_argument(
+        "--scorer",
+        choices=["keyword", "semantic", "hybrid", "llm_judge"],
+        default="keyword",
+        help="Scoring method (default: keyword)",
     )
     parser_interactive.add_argument(
         "--semantic",

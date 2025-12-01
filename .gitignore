@@ -374,4 +374,7 @@ results_*/
 results_*.json
 optimized_*.json
 
+# User config (use config.example.yaml as template)
+config.yaml
+
 # End of https://www.toptal.com/developers/gitignore/api/python,venv,pycharm+all,visualstudiocode,windows,linux,macos
