@@ -5,20 +5,16 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-import requests
+if TYPE_CHECKING:
+    from models import APIClient
+
 from pick import pick
 
-# Import new modular components
-from models import create_client as models_create_client, OPENROUTER_AVAILABLE
-from utils import load_config, export_results, get_interpretation, BenchmarkExporter
-from scoring import (
-    TECHNICAL_AVAILABLE,
-    LLM_JUDGE_AVAILABLE,
-    HYBRID_AVAILABLE,
-)
+# Import modular components
+from models import OllamaClient, create_client
+from utils import load_config
 
 # Optional semantic similarity support
 try:
@@ -27,6 +23,127 @@ try:
     SEMANTIC_AVAILABLE = True
 except ImportError:
     SEMANTIC_AVAILABLE = False
+
+# Optional Langfuse support
+try:
+    from langfuse import get_client
+
+    LANGFUSE_AVAILABLE = True
+except ImportError:
+    LANGFUSE_AVAILABLE = False
+
+
+# === LANGFUSE TRACER ===
+class LangfuseTracer:
+    """Tracer for Langfuse observability."""
+
+    def __init__(self, config):
+        """Initialize Langfuse client (SDK v3)."""
+        self.langfuse = get_client(
+            secret_key=config.secret_key,
+            public_key=config.public_key,
+            host=config.host,
+        )
+        self.current_trace = None  # root span
+        self.current_span = None   # child span для optimization
+
+    def start_benchmark(self, model_name: str, scoring_method: str) -> None:
+        """Start trace for model benchmark (SDK v3)."""
+        self.current_trace = self.langfuse.start_span(
+            name=f"benchmark-{model_name}",
+            metadata={"model": model_name, "scoring_method": scoring_method}
+        )
+
+    def log_generation(
+        self,
+        question_id: int,
+        category: str,
+        prompt: str,
+        response: str,
+        score: int,
+        latency_ms: float,
+        model: str,
+    ) -> None:
+        """Log LLM generation (SDK v3)."""
+        if self.current_trace:
+            # Создаем generation как child span
+            gen = self.current_trace.start_span(
+                name=f"Q{question_id}-{category}",
+                metadata={
+                    "question_id": question_id,
+                    "category": category,
+                    "score": score,
+                    "model": model,
+                }
+            )
+            gen.update(
+                input=prompt,
+                output=response,
+                usage={"latency_ms": latency_ms}
+            )
+            gen.end()  # ВАЖНО: явно завершаем span
+
+    def start_optimization(self, question_id: int, category: str) -> None:
+        """Start span for prompt optimization (SDK v3)."""
+        if self.current_trace:
+            self.current_span = self.current_trace.start_span(
+                name=f"optimization-Q{question_id}",
+                metadata={"category": category}
+            )
+
+    def log_optimization_attempt(
+        self,
+        iteration: int,
+        strategy: str,
+        prompt: str,
+        response: str,
+        score: int,
+        latency_ms: float,
+        model: str,
+    ) -> None:
+        """Log optimization iteration (SDK v3)."""
+        if self.current_span:
+            # Создаем optimization attempt как child span
+            attempt = self.current_span.start_span(
+                name=f"iter-{iteration}-{strategy}",
+                metadata={
+                    "iteration": iteration,
+                    "strategy": strategy,
+                    "score": score,
+                    "model": model,
+                }
+            )
+            attempt.update(
+                input=prompt,
+                output=response,
+                usage={"latency_ms": latency_ms}
+            )
+            attempt.end()  # ВАЖНО: явно завершаем span
+
+    def end_optimization(self, success: bool, best_score: int, iterations: int) -> None:
+        """End optimization span (SDK v3)."""
+        if self.current_span:
+            self.current_span.update(
+                metadata={
+                    "success": success,
+                    "best_score": best_score,
+                    "iterations": iterations,
+                }
+            )
+            self.current_span.end()  # ВАЖНО: явно завершаем span
+            self.current_span = None
+
+    def end_benchmark(self, total_score: float, interpretation: str) -> None:
+        """End benchmark trace (SDK v3)."""
+        if self.current_trace:
+            self.current_trace.update(
+                metadata={
+                    "total_score": total_score,
+                    "interpretation": interpretation,
+                }
+            )
+            self.current_trace.end()  # ВАЖНО: явно завершаем trace
+        self.langfuse.flush()  # Отправляем все данные
 
 
 # === PROMPT OPTIMIZATION ===
@@ -598,175 +715,6 @@ Format your response EXACTLY as:
         return variants
 
 
-# === API CLIENT ABSTRACTION ===
-class APIClient(ABC):
-    """Abstract base class for LLM API clients."""
-
-    def __init__(self, base_url: str, model_name: str):
-        self.base_url = base_url.rstrip("/")
-        self.model_name = model_name
-
-    @abstractmethod
-    def query(self, prompt: str, max_tokens: int = 768, retries: int = 3) -> str:
-        """Query the LLM API with retry logic."""
-        pass
-
-    @abstractmethod
-    def list_models(self) -> List[Dict]:
-        """List available models."""
-        pass
-
-    @abstractmethod
-    def test_connection(self) -> bool:
-        """Test if API is accessible."""
-        pass
-
-
-class LMStudioClient(APIClient):
-    """LM Studio API client (OpenAI-compatible)."""
-
-    def query(self, prompt: str, max_tokens: int = 768, retries: int = 3) -> str:
-        """Query LM Studio API with retry logic."""
-        url = f"{self.base_url}/v1/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "model": self.model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-            "max_tokens": max_tokens,
-            "stream": False,
-        }
-
-        for attempt in range(retries):
-            try:
-                response = requests.post(
-                    url, headers=headers, json=payload, timeout=150
-                )
-                response.raise_for_status()
-                return response.json()["choices"][0]["message"]["content"]
-
-            except requests.exceptions.Timeout:
-                print(f"   ⚠️  Timeout on attempt {attempt + 1}/{retries}")
-                if attempt == retries - 1:
-                    raise RuntimeError(
-                        f"API timeout after {retries} attempts"
-                    ) from None
-                time.sleep(2**attempt)
-
-            except requests.exceptions.ConnectionError as e:
-                raise RuntimeError(
-                    f"Cannot connect to LM Studio at {self.base_url}. Is it running?"
-                ) from e
-
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 429:
-                    print("   ⚠️  Rate limited, waiting...")
-                    time.sleep(5)
-                    continue
-                raise RuntimeError(
-                    f"API error {e.response.status_code}: {e.response.text}"
-                ) from e
-
-            except (KeyError, json.JSONDecodeError) as e:
-                raise RuntimeError(f"Invalid API response format: {e}") from e
-
-        raise RuntimeError("Max retries exceeded")
-
-    def list_models(self) -> List[Dict]:
-        """List available models from LM Studio."""
-        try:
-            url = f"{self.base_url}/v1/models"
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            return data.get("data", [])
-        except Exception as e:
-            raise RuntimeError(f"Failed to list models: {e}") from e
-
-    def test_connection(self) -> bool:
-        """Test LM Studio connection."""
-        try:
-            url = f"{self.base_url}/v1/models"
-            response = requests.get(url, timeout=5)
-            return response.status_code == 200
-        except Exception:
-            return False
-
-
-class OllamaClient(APIClient):
-    """Ollama API client."""
-
-    def query(self, prompt: str, max_tokens: int = 768, retries: int = 3) -> str:
-        """Query Ollama API with retry logic."""
-        url = f"{self.base_url}/api/chat"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "model": self.model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "options": {
-                "temperature": 0.2,
-                "num_predict": max_tokens,
-            },
-        }
-
-        for attempt in range(retries):
-            try:
-                response = requests.post(
-                    url, headers=headers, json=payload, timeout=150
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data["message"]["content"]
-
-            except requests.exceptions.Timeout:
-                print(f"   ⚠️  Timeout on attempt {attempt + 1}/{retries}")
-                if attempt == retries - 1:
-                    raise RuntimeError(
-                        f"API timeout after {retries} attempts"
-                    ) from None
-                time.sleep(2**attempt)
-
-            except requests.exceptions.ConnectionError as e:
-                raise RuntimeError(
-                    f"Cannot connect to Ollama at {self.base_url}. Is it running?"
-                ) from e
-
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 429:
-                    print("   ⚠️  Rate limited, waiting...")
-                    time.sleep(5)
-                    continue
-                raise RuntimeError(
-                    f"API error {e.response.status_code}: {e.response.text}"
-                ) from e
-
-            except (KeyError, json.JSONDecodeError) as e:
-                raise RuntimeError(f"Invalid API response format: {e}") from e
-
-        raise RuntimeError("Max retries exceeded")
-
-    def list_models(self) -> List[Dict]:
-        """List available models from Ollama."""
-        try:
-            url = f"{self.base_url}/api/tags"
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            return data.get("models", [])
-        except Exception as e:
-            raise RuntimeError(f"Failed to list models: {e}") from e
-
-    def test_connection(self) -> bool:
-        """Test Ollama connection."""
-        try:
-            url = f"{self.base_url}/api/tags"
-            response = requests.get(url, timeout=5)
-            return response.status_code == 200
-        except Exception:
-            return False
-
-
 # === HELPER FUNCTIONS ===
 def load_questions(filepath: str = "benchmark.json") -> list:
     """Load benchmark questions from JSON file (single source of truth)."""
@@ -882,35 +830,6 @@ class SemanticScorer:
             return 50
         else:
             return 0
-
-
-def create_client(
-    provider: str,
-    endpoint: Optional[str],
-    model: str,
-    api_key: Optional[str] = None,
-) -> APIClient:
-    """Create appropriate API client based on provider."""
-    # Use modular client for openrouter
-    if provider == "openrouter":
-        return models_create_client(provider, endpoint, model, api_key)
-
-    # Set default endpoints for local providers
-    if endpoint is None:
-        if provider == "lmstudio":
-            endpoint = "http://localhost:1234"
-        elif provider == "ollama":
-            endpoint = "http://localhost:11434"
-        else:
-            raise ValueError(f"Unknown provider: {provider}")
-
-    # Create client
-    if provider == "lmstudio":
-        return LMStudioClient(endpoint, model)
-    elif provider == "ollama":
-        return OllamaClient(endpoint, model)
-    else:
-        raise ValueError(f"Unknown provider: {provider}")
 
 
 def is_censored_response(response: str) -> bool:
@@ -1189,7 +1108,10 @@ def cmd_interactive(args):
                     args.endpoint = config.provider.endpoint
                 if config.scoring.method != "keyword" and args.scorer == "keyword":
                     args.scorer = config.scoring.method
-                if config.scoring.semantic_model and args.semantic_model == "Alibaba-NLP/gte-large-en-v1.5":
+                if (
+                    config.scoring.semantic_model
+                    and args.semantic_model == "Alibaba-NLP/gte-large-en-v1.5"
+                ):
                     args.semantic_model = config.scoring.semantic_model
             except Exception as e:
                 print(f"⚠️  Warning: Failed to load config: {e}")
@@ -1312,6 +1234,12 @@ def cmd_interactive(args):
                 print("   Continuing without optimization\n")
                 optimizer = None
 
+        # Initialize Langfuse tracer if config has it enabled
+        langfuse_config = None
+        if config and config.langfuse.enabled and LANGFUSE_AVAILABLE:
+            langfuse_config = config.langfuse
+            print("✓ Langfuse tracing enabled\n")
+
         # Store results for summary
         all_results = []
 
@@ -1324,7 +1252,9 @@ def cmd_interactive(args):
 
             # Create client for this model
             try:
-                model_client = create_client(args.provider, args.endpoint, model_name, api_key)
+                model_client = create_client(
+                    args.provider, args.endpoint, model_name, api_key
+                )
             except ValueError as e:
                 print(f"❌ Error creating client: {e}")
                 continue
@@ -1333,6 +1263,15 @@ def cmd_interactive(args):
             if not model_client.test_connection():
                 print(f"❌ Cannot connect to model {model_name}")
                 continue
+
+            # Initialize tracer for this model
+            tracer = None
+            if langfuse_config:
+                try:
+                    tracer = LangfuseTracer(langfuse_config)
+                    tracer.start_benchmark(model_name, scoring_method)
+                except Exception as e:
+                    print(f"⚠️  Warning: Failed to start Langfuse trace: {e}")
 
             # Load questions
             questions = load_questions()
@@ -1343,13 +1282,19 @@ def cmd_interactive(args):
             for q in questions:
                 print(f"[Q{q['id']:>2}] {q['category']}...")
                 try:
-                    # Test original prompt first
+                    # Test original prompt first with time measurement
+                    start_time = time.time()
                     resp = model_client.query(q["prompt"])
+                    latency_ms = (time.time() - start_time) * 1000
                     score = scorer(q["id"], resp)
 
                     # If censored and optimizer is enabled, try optimization
                     if score == 0 and optimizer:
                         print("  ⚠️  Censored response (0%), starting optimization...")
+
+                        # Start optimization span in Langfuse
+                        if tracer:
+                            tracer.start_optimization(q["id"], q["category"])
 
                         opt_result = optimizer.optimize_prompt(
                             original_prompt=q["prompt"],
@@ -1359,6 +1304,27 @@ def cmd_interactive(args):
                             category=q["category"],
                             reference_answer=reference_answers.get(q["id"]),
                         )
+
+                        # Log optimization attempts to Langfuse
+                        if tracer and opt_result.get("history"):
+                            for attempt in opt_result["history"]:
+                                tracer.log_optimization_attempt(
+                                    iteration=attempt.get("iteration", 0),
+                                    strategy=attempt.get("strategy", "unknown"),
+                                    prompt=attempt.get("prompt", ""),
+                                    response=attempt.get("response", ""),
+                                    score=attempt.get("score", 0),
+                                    latency_ms=0,
+                                    model=model_name,
+                                )
+
+                        # End optimization span
+                        if tracer:
+                            tracer.end_optimization(
+                                success=opt_result["success"],
+                                best_score=opt_result["score"],
+                                iterations=opt_result["iterations"],
+                            )
 
                         # Use best result from optimization
                         score = opt_result["score"]
@@ -1379,6 +1345,18 @@ def cmd_interactive(args):
                         )
 
                         print(f"  ✓ Optimization complete: {score}%\n")
+                    else:
+                        # Log generation to Langfuse (only if not optimized)
+                        if tracer:
+                            tracer.log_generation(
+                                question_id=q["id"],
+                                category=q["category"],
+                                prompt=q["prompt"],
+                                response=resp,
+                                score=score,
+                                latency_ms=latency_ms,
+                                model=model_name,
+                            )
 
                     results.append(
                         {
@@ -1400,6 +1378,15 @@ def cmd_interactive(args):
             # Calculate score
             if results:
                 total_score = sum(r["score"] for r in results) / len(results)
+                interpretation = (
+                    "production-ready"
+                    if total_score >= 80
+                    else "requires-validation" if total_score >= 60 else "not-suitable"
+                )
+
+                # End Langfuse trace
+                if tracer:
+                    tracer.end_benchmark(total_score, interpretation)
 
                 # Save results
                 save_results(results, model_name, total_score, scoring_method)
@@ -1415,20 +1402,15 @@ def cmd_interactive(args):
                     {
                         "model": model_name,
                         "score": total_score,
-                        "interpretation": (
-                            "production-ready"
-                            if total_score >= 80
-                            else (
-                                "requires-validation"
-                                if total_score >= 60
-                                else "not-suitable"
-                            )
-                        ),
+                        "interpretation": interpretation,
                     }
                 )
 
                 print(f"\n✅ {model_name}: {total_score:.1f}%\n")
             else:
+                # End trace even if no results
+                if tracer:
+                    tracer.end_benchmark(0.0, "failed")
                 print(f"\n❌ No results for {model_name}\n")
 
         # === SUMMARY TABLE ===
@@ -1527,17 +1509,35 @@ def cmd_run_benchmark(args):
             print("   Continuing without optimization\n")
             optimizer = None
 
+    # Initialize Langfuse tracer if config provided
+    tracer = None
+    if getattr(args, "config", None):
+        try:
+            config = load_config(args.config)
+            if config.langfuse.enabled and LANGFUSE_AVAILABLE:
+                tracer = LangfuseTracer(config.langfuse)
+                tracer.start_benchmark(args.model, scoring_method)
+                print("✓ Langfuse tracing enabled\n")
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to initialize Langfuse: {e}\n")
+
     results = []
     for q in questions:
         print(f"[Q{q['id']:>2}] {q['category']}...")
         try:
-            # Test original prompt first
+            # Test original prompt first with time measurement
+            start_time = time.time()
             resp = client.query(q["prompt"])
+            latency_ms = (time.time() - start_time) * 1000
             score = scorer(q["id"], resp)
 
             # If censored and optimizer is enabled, try optimization
             if score == 0 and optimizer:
                 print("  ⚠️  Censored response (0%), starting optimization...")
+
+                # Start optimization span in Langfuse
+                if tracer:
+                    tracer.start_optimization(q["id"], q["category"])
 
                 opt_result = optimizer.optimize_prompt(
                     original_prompt=q["prompt"],
@@ -1547,6 +1547,27 @@ def cmd_run_benchmark(args):
                     category=q["category"],
                     reference_answer=reference_answers.get(q["id"]),
                 )
+
+                # Log optimization attempts to Langfuse
+                if tracer and opt_result.get("history"):
+                    for attempt in opt_result["history"]:
+                        tracer.log_optimization_attempt(
+                            iteration=attempt.get("iteration", 0),
+                            strategy=attempt.get("strategy", "unknown"),
+                            prompt=attempt.get("prompt", ""),
+                            response=attempt.get("response", ""),
+                            score=attempt.get("score", 0),
+                            latency_ms=0,  # Not tracked in optimizer
+                            model=args.model,
+                        )
+
+                # End optimization span
+                if tracer:
+                    tracer.end_optimization(
+                        success=opt_result["success"],
+                        best_score=opt_result["score"],
+                        iterations=opt_result["iterations"],
+                    )
 
                 # Use best result from optimization
                 score = opt_result["score"]
@@ -1567,6 +1588,18 @@ def cmd_run_benchmark(args):
                 )
 
                 print(f"  ✓ Optimization complete: {score}%\n")
+            else:
+                # Log generation to Langfuse (only if not optimized)
+                if tracer:
+                    tracer.log_generation(
+                        question_id=q["id"],
+                        category=q["category"],
+                        prompt=q["prompt"],
+                        response=resp,
+                        score=score,
+                        latency_ms=latency_ms,
+                        model=args.model,
+                    )
 
             results.append(
                 {
@@ -1587,6 +1620,15 @@ def cmd_run_benchmark(args):
 
     # === FINAL REPORT ===
     total_score = sum(r["score"] for r in results) / len(results)
+    interpretation = (
+        "production-ready"
+        if total_score >= 80
+        else "requires-validation" if total_score >= 60 else "not-suitable"
+    )
+
+    # End Langfuse trace
+    if tracer:
+        tracer.end_benchmark(total_score, interpretation)
 
     # Save results
     save_results(results, args.model, total_score, scoring_method)
