@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def scorer():
     """Create scorer instance once for all tests (model loading is expensive)."""
-    scorer = SemanticScorer("all-MiniLM-L6-v2")
+    scorer = SemanticScorer("gte-large-en-v1.5")
     scorer.load_reference_answers("answers_all.txt")
     return scorer
 

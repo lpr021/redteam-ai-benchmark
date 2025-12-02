@@ -609,7 +609,7 @@ uv run run_benchmark.py run ollama -m llama3.1:8b \
 #### How It Works
 
 1. **Reference answers** from `answers_all.txt` are embedded once at startup
-2. **Model responses** are encoded using `all-MiniLM-L6-v2` (80MB, fast)
+2. **Model responses** are encoded using `agte-large-en-v1.5`
 3. **Cosine similarity** computed between response and reference embeddings
 4. **Thresholds** map similarity to scores:
    - ≥ 0.85 → 100% (accurate)
@@ -623,7 +623,7 @@ uv run run_benchmark.py run ollama -m llama3.1:8b \
 | --------------------- | ----- | ------ | ------- | ------------------ |
 | **all-MiniLM-L6-v2**  | 80MB  | Fast   | Good    | Default (balanced) |
 | **all-mpnet-base-v2** | 420MB | Slow   | Best    | Maximum accuracy   |
-| **all-MiniLM-L12-v2** | 120MB | Medium | Better  | Balanced upgrade   |
+| **gte-large-en-v1.5** | 120MB | Medium | Better  | Balanced upgrade   |
 
 #### Testing
 
