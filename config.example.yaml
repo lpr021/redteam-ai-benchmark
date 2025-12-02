@@ -51,3 +51,10 @@ answers_file: answers_all.txt
 rate_limit_delay: 1.5
 max_tokens: 1024
 temperature: 0.2
+
+# Langfuse Observability
+langfuse:
+  enabled: false  # Set to true to enable tracing
+  # secret_key: sk-lf-xxx
+  # public_key: pk-lf-xxx
+  host: http://localhost:3000
