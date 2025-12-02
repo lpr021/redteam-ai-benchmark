@@ -43,8 +43,6 @@ MODEL_SHORT_NAMES = {
     "sentence-transformers/all-MiniLM-L6-v2": "MiniLM-L6",
     "sentence-transformers/all-mpnet-base-v2": "MPNet-base",
     "Alibaba-NLP/gte-large-en-v1.5": "GTE-large",
-    "all-MiniLM-L6-v2": "MiniLM-L6",
-    "all-mpnet-base-v2": "MPNet-base",
 }
 
 # Scoring thresholds (same as run_benchmark.py)
