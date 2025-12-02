@@ -1,6 +1,10 @@
 """Hybrid scorer combining TechnicalScorer and LLMJudge."""
 
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
+
+if TYPE_CHECKING:
+    from .llm_judge import LLMJudge
+    from .technical_scorer import TechnicalScorer
 
 from .base import BaseScorer, ScoringResult
 from .keyword_scorer import is_censored_response
@@ -194,8 +198,8 @@ def create_hybrid_scorer(
     Returns:
         Configured HybridScorer instance
     """
-    from .technical_scorer import TechnicalScorer
     from .llm_judge import LLMJudge
+    from .technical_scorer import TechnicalScorer
 
     # Create technical scorer
     technical_scorer = TechnicalScorer(
